@@ -18,19 +18,25 @@
  */
 package com.tc.objectserver.handler;
 
-import static org.mockito.Mockito.mock;
-
+import com.tc.objectserver.api.Retiree;
 import org.hamcrest.collection.IsIterableContainingInOrder;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 import org.terracotta.entity.ConcurrencyStrategy;
 import org.terracotta.entity.EntityMessage;
 
-import com.tc.objectserver.api.Retiree;
-import org.junit.Assert;
-
+import java.util.AbstractMap;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.mockito.Mockito.mock;
 
 public class RetirementManagerTest {
   private RetirementManager retirementManager;
@@ -91,14 +97,14 @@ public class RetirementManagerTest {
     EntityMessage invokeMessage = mock(EntityMessage.class);
     int concurrencyKey = 1;
     registerWithMessage(request, invokeMessage, concurrencyKey);
-    
+
     Retiree newRequest = makeResponse();
     EntityMessage newMessage = mock(EntityMessage.class);
     this.retirementManager.deferRetirement(invokeMessage, newMessage);
-    
+
     List<Retiree> toRetire = this.retirementManager.retireForCompletion(invokeMessage);
     Assert.assertEquals(0, toRetire.size());
-    
+
     registerWithMessage(newRequest, newMessage, concurrencyKey);
     toRetire = this.retirementManager.retireForCompletion(newMessage);
     Assert.assertEquals(2, toRetire.size());
@@ -467,5 +473,77 @@ public class RetirementManagerTest {
   
   private void registerWithMessage(Retiree resp, EntityMessage message, int concurrency) {
     this.retirementManager.registerWithMessage(message, concurrency, resp);
-  }  
+  }
+
+  @Test
+  public void testParallelDeferredRetire() throws InterruptedException {
+    int pairCount = Math.max(Runtime.getRuntime().availableProcessors() / 2, 2);
+    Object[] locks = new Object[pairCount];
+    for (int i = 0; i < locks.length; i++) {
+      locks[i] = new Object();
+    }
+
+    ConcurrentLinkedQueue<Map.Entry<EntityMessage,Object>> q = new ConcurrentLinkedQueue<>();
+
+    AtomicBoolean stopDefers = new AtomicBoolean(false);
+    AtomicBoolean stopRetires = new AtomicBoolean(false);
+    AtomicInteger ckey = new AtomicInteger(0);
+    Runnable defer = () -> {
+      while (!stopDefers.get()) {
+        int concurrencyKey = ckey.incrementAndGet() % pairCount;
+        synchronized (locks[concurrencyKey]) {
+          Retiree request = makeResponse();
+          EntityMessage invokeMessage = mock(EntityMessage.class);
+          registerWithMessage(request, invokeMessage, concurrencyKey);
+
+          Retiree newRequest = makeResponse();
+          EntityMessage newMessage = mock(EntityMessage.class);
+          retirementManager.deferRetirement(invokeMessage, newMessage);
+          registerWithMessage(newRequest, newMessage, concurrencyKey);
+
+          List<Retiree> toRetire = this.retirementManager.retireForCompletion(invokeMessage);
+          Assert.assertEquals(0, toRetire.size());
+
+          q.add(new AbstractMap.SimpleEntry<>(newMessage, locks[concurrencyKey]));
+        }
+      }
+    };
+
+    Runnable retire = () -> {
+      int cnt=0;
+      for(;;){
+        Map.Entry<EntityMessage, Object> p = q.poll();
+        if (p != null) {
+          this.retirementManager.retireMessage(p.getKey());
+          cnt++;
+        } else {
+          if (stopRetires.get()) {
+            System.out.println("Retired: " + cnt);
+            break;
+          }
+          Thread.yield();
+        }
+      }
+    };
+
+    Collection<Thread> deferThreads = new ArrayList<>();
+    Collection<Thread> retireThreads = new ArrayList<>();
+    for (int i = 0; i < pairCount; i++) {
+      deferThreads.add(new Thread(defer));
+      retireThreads.add(new Thread(retire));
+    }
+
+    retireThreads.forEach(Thread::start);
+    deferThreads.forEach(Thread::start);
+    TimeUnit.SECONDS.sleep(15);
+    stopDefers.set(true);
+    for (Thread t : deferThreads) {
+      t.join();
+    }
+    stopRetires.set(true);
+    for (Thread t : retireThreads) {
+      t.join();
+    }
+    System.out.println(this.retirementManager.getState());
+  }
 }
