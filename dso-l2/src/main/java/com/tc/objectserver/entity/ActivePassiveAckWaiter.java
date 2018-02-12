@@ -28,6 +28,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 
 /**
@@ -44,28 +45,37 @@ public class ActivePassiveAckWaiter {
 
   public ActivePassiveAckWaiter(Set<NodeID> allPassiveNodes, PassiveReplicationBroker parent) {
     this.start =  Collections.unmodifiableSet(allPassiveNodes);
-    this.receivedPending =  new HashSet<>(allPassiveNodes);
-    this.completedPending =  new HashSet<>(allPassiveNodes);
+
+    this.receivedPending = ConcurrentHashMap.newKeySet();
+    this.receivedPending.addAll(allPassiveNodes);
+
+    this.completedPending = ConcurrentHashMap.newKeySet();
+    this.completedPending.addAll(allPassiveNodes);
+
     this.receivedByComplete =  new HashSet<>();
     this.results = new HashMap<>();
     this.parent = parent;
   }
 
-  public synchronized void waitForReceived() {
+  public void waitForReceived() {
     try {
       while (!this.receivedPending.isEmpty()) {
-        wait();
+        synchronized (this) {
+          wait();
+        }
       }
     } catch (InterruptedException ie) {
       throw new RuntimeException(ie);
     }
   }
 
-  public synchronized void waitForCompleted() {
+  public void waitForCompleted() {
     try {
       while (!this.completedPending.isEmpty()) {
-        wait();
-     }
+        synchronized (this) {
+          wait();
+        }
+      }
     } catch (InterruptedException ie) {
       throw new RuntimeException(ie);
     }
@@ -140,3 +150,4 @@ public class ActivePassiveAckWaiter {
     return "ActivePassiveAckWaiter{" + "start=" + start + ", receivedPending=" + receivedPending + ", receivedByComplete=" + receivedByComplete + ", completedPending=" + completedPending + ", results=" + results + '}';
   }
 }
+
